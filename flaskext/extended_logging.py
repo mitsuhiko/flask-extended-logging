@@ -34,7 +34,7 @@ class LoggerWrapper(LoggerAdapter, object):
 
     If values are unavailable (for example because the log entry was
     emitted from a background thread that was not request bound) the
-    value will be ``'?'``.
+    value will be an empty string (``''``).
     """
 
     def __init__(self, logger):
@@ -65,14 +65,14 @@ class LoggerWrapper(LoggerAdapter, object):
 
     def process(self, msg, kwargs):
         msg, kwargs = LoggerAdapter.process(self, msg, kwargs)
-        path = method = remote_addr = user_agent = url = '?'
+        path = method = remote_addr = user_agent = url = u''
         ctx = _request_ctx_stack.top
         if ctx is not None:
             path = ctx.request.path
             url = ctx.request.url
             method = ctx.request.method
             remote_addr = ctx.request.remote_addr
-            user_agent = ctx.request.headers.get('user-agent', '?')
+            user_agent = ctx.request.headers.get('user-agent', u'')
         kwargs['extra'].update(
             http_path=path,
             http_url=url,
@@ -126,6 +126,34 @@ class TemplatedFormatter(Formatter, object):
     for log entry formatting.  This has the huge advantage that it's
     possible to conditionally format entries which is very handy for
     mail notifications and similar notification types.
+
+    Example::
+
+        mail_handler = logging.SMTPHandler('127.0.0.1',
+                                           'server-error@example.com',
+                                           ADMINS, 'Application Failed')
+        mail_handler.setFormatter(TemplatedFormatter(app, template_string='''\
+        Message type:       {{ levelname }}
+        Location:           {{ pathname }}:{{ lineno }}
+        Module:             {{ module }}
+        Function:           {{ funcName }}
+        Time:               {{ time }}
+        {%- if http_url %}
+        Request URL:        {{ http_url }} [{{ http_method or 'UNKNOWN' }}]
+        {%- endif %}
+
+        Message:
+
+        {{ message }}
+
+        {%- if exc_info %}
+
+        Traceback:
+
+        {{ exc_info }}
+        {%- endif %}
+        '''))
+        app.logger.addHandler(mail_handler)
     """
 
     def __init__(self, app, template_name=None, template_string=None):
@@ -145,20 +173,23 @@ class TemplatedFormatter(Formatter, object):
         return self._template
 
     def format(self, record):
-        context = dict(record.__dict__)
-
-        # cache keys and other things that might have been attached by
-        # another log formatter before.  We get rid of that first.
-        for key in ('exc_text', 'asctime', 'message'):
-            context.pop(key, None)
-
-        # we pass datetime objects to jinja, they are easier to handle.
-        context['created'] = datetime(*context['created'][:7])
+        context = {}
+        for key, value in record.__dict__.iteritems():
+            # cache keys and other things that might have been attached by
+            # another log formatter before.  We get rid of that first.
+            if key in ('exc_text', 'asctime'):
+                continue
+            # we pass datetime objects to jinja, they are easier to handle.
+            if key == 'created':
+                value = datetime(*value[:7])
+            # make sure strings are unicode
+            if isinstance(value, str):
+                value = value.decode('utf-8', 'replace')
+            context[key] = value
 
         # the exception information is an object with a few methods to
         # test and format exceptions
         context['exc_info'] = _ExceptionInfo(context.get('exc_info'))
-
         return self.template.render(context)
 
 
