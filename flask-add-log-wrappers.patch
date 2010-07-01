@@ -1,0 +1,102 @@
+diff --git a/flask.py b/flask.py
+index 90867fc..f01c94e 100644
+--- a/flask.py
++++ b/flask.py
+@@ -944,10 +944,20 @@ class Flask(_PackageBoundObject):
+         #: to load a config from files.
+         self.config = Config(self.root_path, self.default_config)
+ 
+-        #: Prepare the deferred setup of the logger.
++        # Prepare the deferred setup of the logger.
+         self._logger = None
++
++        #: The name of the logger
++        #:
++        #: .. versionadded:: 0.4
+         self.logger_name = self.import_name
+ 
++        #: A list of wrapper classes to be applied to the logger.  By
++        #: default this list is empty but can be filled by extensions
++        #: or application code with callables that are passed the
++        #: current decorated logger and return a new one.
++        self.logger_wrappers = []
++
+         #: A dictionary of all view functions registered.  The keys will
+         #: be function names which are also used to generate URLs and
+         #: the values are the function objects themselves.
+@@ -1058,9 +1068,26 @@ class Flask(_PackageBoundObject):
+             logger = getLogger(self.logger_name)
+             logger.__class__ = DebugLogger
+             logger.addHandler(handler)
++            for wrapper in self.logger_wrappers:
++                logger = wrapper(logger)
+             self._logger = logger
+             return logger
+ 
++    def logwrapper(self, f):
++        """Here an example log wrapper that injects an `app_version`
++        variable to the logging system.  This can be used by
++        applications and extensions to add a proxy for a logger.
++
++        Keep in mind that all attributes have to be forwarded to
++        the proxied class, a standard :class:`logging.LoggerAdapter`
++        is not sufficient.
++
++        .. versionadded:: 0.5
++        """
++        self.logger_wrappers.append(f)
++        self._logger = None
++        return f
++
+     def create_jinja_loader(self):
+         """Creates the Jinja loader.  By default just a package loader for
+         the configured package is returned that looks up templates in the
+diff --git a/tests/flask_tests.py b/tests/flask_tests.py
+index 1c5dc72..64fbb5c 100644
+--- a/tests/flask_tests.py
++++ b/tests/flask_tests.py
+@@ -16,7 +16,7 @@ import sys
+ import flask
+ import unittest
+ import tempfile
+-from logging import StreamHandler
++import logging
+ from contextlib import contextmanager
+ from datetime import datetime
+ from werkzeug import parse_date, parse_options_header
+@@ -750,7 +750,7 @@ class LoggingTestCase(unittest.TestCase):
+         out = StringIO()
+         app = flask.Flask(__name__)
+         app.logger_name = 'flask_tests/test_exception_logging'
+-        app.logger.addHandler(StreamHandler(out))
++        app.logger.addHandler(logging.StreamHandler(out))
+ 
+         @app.route('/')
+         def index():
+@@ -788,6 +788,26 @@ class LoggingTestCase(unittest.TestCase):
+             assert rv.status_code == 500
+             assert rv.data == 'Hello Server Error'
+ 
++    def test_logger_wrappers(self):
++        out = StringIO()
++        class LoggerWrapper(logging.LoggerAdapter):
++            def __getattr__(self, name):
++                return getattr(self.logger, name)
++
++        app = flask.Flask(__name__)
++        app.logger_name = __name__ + '/test_logger_wrappers'
++        @app.logwrapper
++        def app_version_log_wrapper(logger):
++            return LoggerWrapper(logger, extra={
++                'app_version': '1.0'
++            })
++        handler = logging.StreamHandler(out)
++        handler.setFormatter(logging.Formatter('%(app_version)s:%(message)s'))
++        app.logger.addHandler(handler)
++
++        app.logger.error('Testing')
++        assert out.getvalue().strip() == '1.0:Testing'
++
+ 
+ class ConfigTestCase(unittest.TestCase):
+ 

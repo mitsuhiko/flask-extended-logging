@@ -3,18 +3,29 @@
     flaskext.extended_logging
     ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    Description of the module goes here...
+    Abandoned:
+
+    problems with logging:
+
+    -   loggers cannot be wrapped to inject additional information.
+        The locations are totally broken then because logging uses
+        non-configurable magic to look up locations.
+
+    -   loggers cannot be deleted which is painful for unittesting.
+        There just should not be a different loggers in a registry.
 
     :copyright: (c) 2010 by Armin Ronacher.
     :license: BSD, see LICENSE for more details.
 """
+import sys
+import time
 import traceback
 from datetime import datetime
 from flask import _request_ctx_stack
-from logging import LoggerAdapter, Formatter
+from logging import Formatter
 
 
-class LoggerWrapper(LoggerAdapter, object):
+class LoggerWrapper(object):
     """Wrapps a logger to inject additional variables into the
     format string automatically.
 
@@ -38,8 +49,62 @@ class LoggerWrapper(LoggerAdapter, object):
     """
 
     def __init__(self, logger):
-        LoggerAdapter.__init__(self, logger, {})
+        self.logger = logger
         self.extra_handlers = []
+
+    def process(self, msg, kwargs):
+        path = method = remote_addr = user_agent = url = u''
+        ctx = _request_ctx_stack.top
+        if ctx is not None:
+            path = ctx.request.path
+            url = ctx.request.url
+            method = ctx.request.method
+            remote_addr = ctx.request.remote_addr
+            user_agent = ctx.request.headers.get('user-agent', u'')
+        kwargs['extra'] = dict(
+            http_path=path,
+            http_url=url,
+            http_method=method,
+            http_remote_addr=remote_addr,
+            http_user_agent=user_agent
+        )
+        for handler in self.extra_handlers:
+            handler(kwargs['extra'], ctx)
+        return msg, kwargs
+
+    def debug(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.debug(msg, *args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.info(msg, *args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.warning(msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.error(msg, *args, **kwargs)
+
+    def exception(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        kwargs['exc_info'] = sys.exc_info()
+        # exception won't work, because it does not
+        # accept an extra argument (for whatever reason)
+        self.logger.error(msg, *args, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.critical(msg, *args, **kwargs)
+
+    def log(self, level, msg, *args, **kwargs):
+        msg, kwargs = self.process(msg, kwargs)
+        self.logger.log(level, msg, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.logger, name)
 
     @property
     def inject(self, f):
@@ -62,27 +127,6 @@ class LoggerWrapper(LoggerAdapter, object):
         """
         self.extra_handlers.append(f)
         return f
-
-    def process(self, msg, kwargs):
-        msg, kwargs = LoggerAdapter.process(self, msg, kwargs)
-        path = method = remote_addr = user_agent = url = u''
-        ctx = _request_ctx_stack.top
-        if ctx is not None:
-            path = ctx.request.path
-            url = ctx.request.url
-            method = ctx.request.method
-            remote_addr = ctx.request.remote_addr
-            user_agent = ctx.request.headers.get('user-agent', u'')
-        kwargs['extra'].update(
-            http_path=path,
-            http_url=url,
-            http_method=method,
-            http_remote_addr=remote_addr,
-            http_user_agent=user_agent
-        )
-        for handler in self.extra_handlers:
-            handler(kwargs['extra'], ctx)
-        return msg, kwargs
 
 
 class _ExceptionInfo(object):
@@ -181,7 +225,7 @@ class TemplatedFormatter(Formatter, object):
                 continue
             # we pass datetime objects to jinja, they are easier to handle.
             if key == 'created':
-                value = datetime(*value[:7])
+                value = datetime(*time.gmtime(value)[:7])
             # make sure strings are unicode
             if isinstance(value, str):
                 value = value.decode('utf-8', 'replace')
@@ -190,9 +234,10 @@ class TemplatedFormatter(Formatter, object):
         # the exception information is an object with a few methods to
         # test and format exceptions
         context['exc_info'] = _ExceptionInfo(context.get('exc_info'))
+        context['message'] = record.getMessage()
         return self.template.render(context)
 
 
 def init_extended_logging(app):
     """Activates extended logging for the given application."""
-    app.logger = LoggerWrapper(app.logger)
+    app.logwrapper(LoggerWrapper)
